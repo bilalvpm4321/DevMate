@@ -5,12 +5,20 @@
 
 [CmdletBinding()]
 param(
-    [switch]$bots = $false
+    [switch]$bots = $false,
+    [switch]$help = $false
 )
 
-# Also support raw --bots argument passed from batch files or PowerShell
+# Also support raw --bots or --help arguments passed from batch files or PowerShell
 if ($args -contains "--bots" -or $args -contains "-bots") {
     $bots = $true
+}
+if ($help -or $args -contains "--help" -or $args -contains "-help" -or $args -contains "-h") {
+    Write-Host "DevMate Launcher" -ForegroundColor Cyan
+    Write-Host "Usage: start.bat [--bots]"
+    Write-Host "  --bots    Also start Discord and Telegram community bots"
+    Write-Host "  --help    Show this help message"
+    exit 0
 }
 
 # Ensure script runs from the repository root directory
@@ -57,7 +65,34 @@ try {
 # 1. Check Python (>= 3.10)
 # ------------------------------------------------------------------------------
 function Find-Python {
-    $candidates = @("python", "python3", "py -3")
+    # Refresh PATH from registry so newly installed software is detected immediately
+    try {
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $env:Path = "$userPath;$machinePath;$env:Path"
+    } catch {}
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $candidates.Add("py -3")
+    $candidates.Add("py")
+    $candidates.Add("python")
+    $candidates.Add("python3")
+
+    # Search standard Python installation directories on Windows
+    $commonSearchPatterns = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe",
+        "$env:ProgramFiles\Python3*\python.exe",
+        "C:\Python3*\python.exe"
+    )
+    foreach ($pattern in $commonSearchPatterns) {
+        $found = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | Sort-Object FullName -Descending
+        foreach ($item in $found) {
+            if (Test-Path $item.FullName) {
+                $candidates.Add($item.FullName)
+            }
+        }
+    }
+
     foreach ($cand in $candidates) {
         try {
             $parts = $cand -split " "
