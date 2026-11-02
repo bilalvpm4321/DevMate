@@ -12,7 +12,7 @@ load_dotenv()
 @dataclass(frozen=True)
 class Settings:
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
     jwt_secret: str = os.getenv("JWT_SECRET", "dev-secret-change-me-please-use-env-file")
     jwt_hours: int = int(os.getenv("JWT_HOURS", "168"))
     db_path: str = os.getenv("DEVMATE_DB", "devmate.db")
