@@ -1,0 +1,14 @@
+# DevMate Root .gitignore
+.env
+*.env
+*.db
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+**/.venv/
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.DS_Store
