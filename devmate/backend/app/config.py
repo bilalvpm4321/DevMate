@@ -21,6 +21,8 @@ class Settings:
     )
     github_token: str = os.getenv("GITHUB_TOKEN", "")
     bot_api_key: str = os.getenv("BOT_API_KEY", "")
+    openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
+    openrouter_model: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
 
     # Repository indexing limits
     max_file_bytes: int = 200_000

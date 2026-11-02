@@ -25,4 +25,9 @@ for module in (auth, chat, repos, bot):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "ai_configured": bool(settings.gemini_api_key)}
+    return {
+        "status": "ok",
+        "ai_configured": bool(settings.gemini_api_key or settings.openrouter_api_key),
+        "primary_provider": "gemini" if settings.gemini_api_key else ("openrouter" if settings.openrouter_api_key else "none"),
+        "fallback_configured": bool(settings.openrouter_api_key and settings.gemini_api_key),
+    }
