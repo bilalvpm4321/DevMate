@@ -24,7 +24,7 @@ async def generate(system: str, prompt: str, history: list[dict] | None = None) 
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 4096},
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192},
     }
     try:
         async with httpx.AsyncClient(timeout=90) as client:

@@ -9,7 +9,12 @@ export interface Repo {
 }
 export interface RepoFile { path: string; language: string; lines: number }
 export interface Issue { number: number; title: string; url: string; labels: string[]; beginner_friendly: boolean }
-export interface RepoAnswer { reply: string; sources: Source[] }
+export interface RepoAnswer {
+  reply: string;
+  sources: Source[];
+  confidence?: "high" | "medium" | "low";
+  inferred?: boolean;
+}
 
 let token: string | null = localStorage.getItem("devmate_token");
 
@@ -54,6 +59,7 @@ export const api = {
     post<{ conversation_id: number; reply: string }>("/chat", { message, mode, conversation_id }),
   repos: () => request<Repo[]>("/repos"),
   connectRepo: (url: string) => post<Repo>("/repos", { url }),
+  reindexRepo: (id: number) => post<Repo>(`/repos/${id}/reindex`),
   deleteRepo: (id: number) => request<{ ok: boolean }>(`/repos/${id}`, { method: "DELETE" }),
   files: (id: number) => request<RepoFile[]>(`/repos/${id}/files`),
   ask: (id: number, question: string, file_path?: string) =>

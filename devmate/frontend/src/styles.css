@@ -27,7 +27,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .content { flex: 1; overflow: auto; padding: 24px 28px; min-height: 0; }
 
 /* controls */
-.btn { border: 1px solid var(--line); background: var(--surface); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-weight: 500; }
+.btn { border: 1px solid var(--line); background: var(--surface); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-weight: 500; white-space: nowrap; }
 .btn:hover { border-color: #c9d2de; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.primary:hover { background: #09606f; }
@@ -39,9 +39,15 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .row.wrap { flex-wrap: wrap; }
 .muted { color: var(--muted); font-size: 13px; }
 .error { background: var(--danger-soft); color: var(--danger); padding: 10px 14px; border-radius: 8px; font-size: 14px; }
-.chip { border: 1px solid var(--line); background: var(--surface); padding: 6px 12px; border-radius: 999px; cursor: pointer; font-size: 13px; color: var(--ink); }
+.chip { border: 1px solid var(--line); background: var(--surface); padding: 6px 12px; border-radius: 999px; cursor: pointer; font-size: 13px; color: var(--ink); white-space: nowrap; }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
 .tag { display: inline-block; background: var(--accent-soft); color: var(--accent); padding: 1px 8px; border-radius: 999px; font-size: 12px; margin-right: 4px; }
+.badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; letter-spacing: 0.2px; white-space: nowrap; }
+.badge.high { background: #e6f8ee; color: #0d8a43; border: 1px solid #b7ecd0; }
+.badge.medium { background: #fef6e7; color: #b57a09; border: 1px solid #f9dfad; }
+.badge.low { background: #f2f4f7; color: #667085; border: 1px solid #d0d5dd; }
+.badge.inferred { background: #eef4ff; color: #3559c7; border: 1px solid #c7d7fe; }
+.progress-box { padding: 10px 14px; background: var(--accent-soft); border-radius: 8px; font-size: 13px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
 .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
 .empty { text-align: center; color: var(--muted); padding: 48px 16px; }
 .empty h2 { color: var(--ink); font-size: 18px; margin: 0 0 6px; }
@@ -77,7 +83,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
 .tab { border: 0; background: none; padding: 8px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-weight: 500; }
 .tab.active { color: var(--accent); border-color: var(--accent); }
-.panel { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.panel { display: flex; flex-direction: column; min-height: 0; height: 100%; min-width: 0; }
 .files { max-height: 100%; overflow: auto; }
 .file { display: flex; justify-content: space-between; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-family: var(--mono); font-size: 13px; }
 .file:hover, .file.active { background: var(--accent-soft); }

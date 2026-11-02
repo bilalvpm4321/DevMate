@@ -37,6 +37,12 @@ def delete(repo_id: int, user: dict = Depends(current_user)):
     return {"ok": True}
 
 
+@router.post("/{repo_id}/reindex")
+async def reindex(repo_id: int, user: dict = Depends(current_user)):
+    own_repo(repo_id, user)
+    return await indexer.reindex_repository(repo_id, user["id"])
+
+
 @router.get("/{repo_id}/files")
 def files(repo_id: int, user: dict = Depends(current_user)):
     own_repo(repo_id, user)

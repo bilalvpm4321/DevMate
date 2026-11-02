@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS repositories (
     commit_sha TEXT DEFAULT '',
     file_count INTEGER DEFAULT 0,
     chunk_count INTEGER DEFAULT 0,
+    project_profile TEXT DEFAULT '',
+    project_summary TEXT DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS code_chunks (
@@ -50,6 +52,16 @@ CREATE TABLE IF NOT EXISTS code_chunks (
     content TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_repo ON code_chunks(repo_id);
+CREATE TABLE IF NOT EXISTS file_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    commit_sha TEXT DEFAULT '',
+    summary TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(repo_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_summaries_repo ON file_summaries(repo_id);
 CREATE TABLE IF NOT EXISTS generated_docs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -74,3 +86,10 @@ def db():
 def init_db() -> None:
     with db() as conn:
         conn.executescript(SCHEMA)
+        # Safe migrations for existing databases
+        cursor = conn.execute("PRAGMA table_info(repositories)")
+        existing_cols = {row["name"] for row in cursor.fetchall()}
+        if "project_profile" not in existing_cols:
+            conn.execute("ALTER TABLE repositories ADD COLUMN project_profile TEXT DEFAULT ''")
+        if "project_summary" not in existing_cols:
+            conn.execute("ALTER TABLE repositories ADD COLUMN project_summary TEXT DEFAULT ''")
