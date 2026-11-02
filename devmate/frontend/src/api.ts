@@ -6,14 +6,29 @@ export interface Source { path: string; start_line: number; end_line: number; ur
 export interface Repo {
   id: number; owner: string; name: string; url: string; description: string;
   languages: string; file_count: number; chunk_count: number;
+  readme_score?: number | null;
+  readme_quality?: "detailed" | "basic" | "poor" | null;
+  analysis_report?: string | null;
 }
 export interface RepoFile { path: string; language: string; lines: number }
 export interface Issue { number: number; title: string; url: string; labels: string[]; beginner_friendly: boolean }
+export interface AnswerMeta {
+  mode_used: "quick" | "detailed";
+  used_readme: boolean;
+  readme_quality: "detailed" | "basic" | "poor";
+  llm_calls: number;
+  approx_input_tokens: number;
+  approx_output_tokens: number;
+  cached: boolean;
+}
 export interface RepoAnswer {
   reply: string;
   sources: Source[];
   confidence?: "high" | "medium" | "low";
   inferred?: boolean;
+  suggest_detailed?: boolean;
+  suggest_reason?: string;
+  meta?: AnswerMeta;
 }
 
 let token: string | null = localStorage.getItem("devmate_token");
@@ -62,8 +77,12 @@ export const api = {
   reindexRepo: (id: number) => post<Repo>(`/repos/${id}/reindex`),
   deleteRepo: (id: number) => request<{ ok: boolean }>(`/repos/${id}`, { method: "DELETE" }),
   files: (id: number) => request<RepoFile[]>(`/repos/${id}/files`),
-  ask: (id: number, question: string, file_path?: string) =>
-    post<RepoAnswer>(`/repos/${id}/ask`, { question, file_path }),
+  ask: (id: number, question: string, file_path?: string, mode: "quick" | "detailed" = "quick") =>
+    post<RepoAnswer>(`/repos/${id}/ask`, { question, file_path, mode }),
+  analyzeRepo: (id: number, refresh: boolean = false) =>
+    post<{ report: string; cached: boolean }>(`/repos/${id}/analyze?refresh=${refresh}`),
+  getAnalyzeStatus: (id: number) =>
+    request<{ status: "idle" | "running" | "done" | "error"; step: string; progress: number; report: string | null; error: string | null }>(`/repos/${id}/analyze/status`),
   docs: (id: number) => post<{ markdown: string }>(`/repos/${id}/docs`),
   issues: (id: number) => request<Issue[]>(`/repos/${id}/issues`),
   explainIssue: (id: number, n: number) => post<RepoAnswer>(`/repos/${id}/issues/${n}/explain`),

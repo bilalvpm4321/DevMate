@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..db import db
 from ..schemas import AskRequest, RepoConnectRequest
 from ..security import current_user
-from ..services import github, indexer, llm, prompts, rag, retriever
+from ..services import analyzer, github, indexer, llm, prompts, rag, retriever
 
 router = APIRouter(prefix="/repos", tags=["repositories"])
 
@@ -55,7 +55,19 @@ def files(repo_id: int, user: dict = Depends(current_user)):
 
 @router.post("/{repo_id}/ask")
 async def ask(repo_id: int, body: AskRequest, user: dict = Depends(current_user)):
-    return await rag.answer(own_repo(repo_id, user), body.question, body.file_path)
+    return await rag.answer(own_repo(repo_id, user), body.question, body.file_path, mode=body.mode)
+
+
+@router.post("/{repo_id}/analyze")
+async def analyze(repo_id: int, refresh: bool = False, user: dict = Depends(current_user)):
+    repo = own_repo(repo_id, user)
+    return await analyzer.run_detailed_analysis(repo, refresh=refresh)
+
+
+@router.get("/{repo_id}/analyze/status")
+def analyze_status(repo_id: int, user: dict = Depends(current_user)):
+    own_repo(repo_id, user)
+    return analyzer.get_analysis_status(repo_id)
 
 
 @router.post("/{repo_id}/docs")

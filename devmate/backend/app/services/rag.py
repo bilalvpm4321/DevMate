@@ -1,10 +1,10 @@
-"""Retrieval-augmented question answering with query routing, hybrid retrieval and profile inference."""
+"""Retrieval-augmented question answering with dual Quick/Detailed modes, README ranking, and query caching."""
 import json
 import re
 from typing import Any
 
 from ..db import db
-from . import llm, profile, prompts
+from . import llm, profile, prompts, readme
 from .retriever import BM25Index, get_index, tokenize
 
 NO_MATCH = (
@@ -25,6 +25,9 @@ OVERVIEW_PATTERNS = [
     re.compile(r"""^(what\s+is\s+this\??|what\s+is\s+this\s+project\??|purpose\??)$""", re.I),
 ]
 
+# In-memory query cache: (repo_id, commit_sha, mode, question, file_path) -> dict
+_MEM_QUERY_CACHE: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
+
 
 def classify_question(question: str, file_path: str | None = None) -> str:
     """Classifies question as 'file', 'overview', or 'specific'."""
@@ -34,7 +37,6 @@ def classify_question(question: str, file_path: str | None = None) -> str:
     for pattern in OVERVIEW_PATTERNS:
         if pattern.search(q):
             return "overview"
-    # Short generic prompt checks
     q_words = set(re.findall(r"\w+", q.lower()))
     if len(q_words) <= 5 and q_words.intersection({"purpose", "overview", "architecture", "stack", "features", "summary"}):
         return "overview"
@@ -64,7 +66,6 @@ def _get_project_profile(repo: dict) -> dict[str, Any]:
         except Exception:
             pass
 
-    # Build from database chunks if missing
     with db() as conn:
         rows = conn.execute("SELECT path, content FROM code_chunks WHERE repo_id = ?", (repo["id"],)).fetchall()
         files = [(r["path"], r["content"]) for r in rows]
@@ -80,11 +81,83 @@ def _get_file_summaries(repo_id: int) -> dict[str, str]:
         return {r["path"]: r["summary"] for r in rows if r["summary"]}
 
 
+def _get_readme_info(repo: dict) -> tuple[int, str, str]:
+    """Returns (score, quality, cleaned) for repo README, computing on the fly if unindexed."""
+    score = repo.get("readme_score")
+    quality = repo.get("readme_quality")
+    cleaned = repo.get("readme_cleaned")
+    if quality and score is not None and cleaned is not None:
+        return int(score), str(quality), str(cleaned)
+
+    # Check for README chunks in database
+    with db() as conn:
+        row = conn.execute(
+            "SELECT content FROM code_chunks WHERE repo_id = ? AND (path LIKE '%README%' OR path LIKE '%readme%') "
+            "ORDER BY LENGTH(path) ASC LIMIT 1",
+            (repo["id"],),
+        ).fetchone()
+        raw_text = row["content"] if row else ""
+
+    score, quality, cleaned = readme.score_readme(raw_text)
+    with db() as conn:
+        conn.execute(
+            "UPDATE repositories SET readme_score = ?, readme_quality = ?, readme_cleaned = ? WHERE id = ?",
+            (score, quality, cleaned, repo["id"]),
+        )
+    repo["readme_score"] = score
+    repo["readme_quality"] = quality
+    repo["readme_cleaned"] = cleaned
+    return score, quality, cleaned
+
+
+def _check_cache(repo_id: int, commit_sha: str, mode: str, question: str, file_path: str) -> dict[str, Any] | None:
+    key = (repo_id, commit_sha, mode, question.strip().lower(), file_path.strip().lower())
+    if key in _MEM_QUERY_CACHE:
+        hit = dict(_MEM_QUERY_CACHE[key])
+        hit_meta = dict(hit.get("meta", {}))
+        hit_meta["cached"] = True
+        hit_meta["llm_calls"] = 0
+        hit["meta"] = hit_meta
+        return hit
+
+    with db() as conn:
+        row = conn.execute(
+            "SELECT response_json FROM query_cache WHERE repo_id = ? AND commit_sha = ? AND mode = ? AND question = ? AND file_path = ?",
+            (repo_id, commit_sha, mode, question.strip().lower(), file_path.strip().lower()),
+        ).fetchone()
+        if row:
+            try:
+                data = json.loads(row["response_json"])
+                data_meta = dict(data.get("meta", {}))
+                data_meta["cached"] = True
+                data_meta["llm_calls"] = 0
+                data["meta"] = data_meta
+                _MEM_QUERY_CACHE[key] = data
+                return data
+            except Exception:
+                pass
+    return None
+
+
+def _save_cache(repo_id: int, commit_sha: str, mode: str, question: str, file_path: str, response: dict[str, Any]):
+    key = (repo_id, commit_sha, mode, question.strip().lower(), file_path.strip().lower())
+    _MEM_QUERY_CACHE[key] = response
+    try:
+        with db() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO query_cache (repo_id, commit_sha, mode, question, file_path, response_json) VALUES (?,?,?,?,?,?)",
+                (repo_id, commit_sha, mode, question.strip().lower(), file_path.strip().lower(), json.dumps(response)),
+            )
+    except Exception:
+        pass
+
+
 async def expand_query(question: str) -> list[str]:
-    """Generates 3-4 diverse search queries with synonyms and identifiers."""
+    """Generates diverse search queries with LLM call."""
     queries = [question]
     try:
-        res = await llm.generate(prompts.QUERY_EXPANSION, f"User question: {question}")
+        prompt = f"User question: {question}"
+        res = await llm.generate(prompts.QUERY_EXPANSION, prompt)
         if res:
             for line in res.splitlines():
                 clean = line.strip().strip("-*#\"'").strip()
@@ -93,7 +166,6 @@ async def expand_query(question: str) -> list[str]:
     except Exception:
         pass
 
-    # Deterministic rule-based expansion fallback
     q_lower = question.lower()
     if any(k in q_lower for k in ("login", "auth", "signin", "signup", "user", "password")):
         queries.extend(["auth jwt token login session", "password bcrypt user authenticate credentials"])
@@ -153,15 +225,78 @@ def add_neighbour_chunks(repo_id: int, top_chunks: list[dict], max_added: int = 
     return enriched
 
 
-async def answer_overview(repo: dict, question: str) -> dict[str, Any]:
-    """Generates a comprehensive project overview inferred from code, stack, and models."""
+async def answer_readme_overview(repo: dict, question: str, cleaned_readme: str) -> tuple[dict[str, Any], int, int, int]:
+    """Answers overview questions in Quick Mode using ONLY ranked README sections + deterministic profile. Exactly 1 LLM call."""
     prof = _get_project_profile(repo)
     prof_md = profile.format_profile_markdown(prof)
-    file_summaries = _get_file_summaries(repo["id"])
+    sections = readme.split_readme_sections(cleaned_readme)
+    ranked = readme.rank_readme_sections(sections, question, top_k=5)
 
-    # Load project summary if already stored, or generate
+    sections_text = "\n\n".join(f"### Section: {s['title']}\n{s['content']}" for s in ranked)
+    prompt = (
+        f"Repository: {repo['owner']}/{repo['name']}\n\n"
+        f"Project Profile:\n{prof_md}\n\n"
+        f"README Sections:\n{sections_text}\n\n"
+        f"Question: {question}\n\n"
+        "Remember: Answer from the README and project profile. Be detailed and well structured. "
+        "If something is not in them, say so and suggest using Detailed analysis."
+    )
+
+    llm_calls = 1
+    input_chars = len(prompt)
+    reply = await llm.generate(prompts.README_OVERVIEW, prompt)
+    if not reply:
+        reply = (
+            f"# {repo['name']}: Project Overview (from README)\n\n"
+            f"{llm.OFFLINE_NOTICE}\n\n"
+            f"{prof_md}\n\n"
+            f"### Relevant README Sections\n{sections_text[:3500]}"
+        )
+    output_chars = len(reply)
+
+    sources = []
+    ref = repo.get("commit_sha") or repo.get("default_branch") or "main"
+    for s in ranked[:4]:
+        sources.append({
+            "path": f"README.md > {s['title']}",
+            "start_line": 1,
+            "end_line": len(s["content"].splitlines()) or 1,
+            "url": f"{repo['url']}/blob/{ref}/README.md",
+            "snippet": s["content"][:300],
+            "score": 1.0,
+        })
+
+    result = {
+        "reply": reply,
+        "sources": sources,
+        "confidence": "high",
+        "inferred": False,
+    }
+    return result, llm_calls, input_chars, output_chars
+
+
+async def answer_overview(repo: dict, question: str, mode: str = "quick") -> tuple[dict[str, Any], int, int, int]:
+    """Generates project overview from code analysis, stack, and models."""
+    llm_calls = 0
+    input_chars = 0
+    output_chars = 0
+
+    prof = _get_project_profile(repo)
+    prof_md = profile.format_profile_markdown(prof)
+
+    # In detailed mode, ensure missing file summaries are generated on demand
+    commit_sha = repo.get("commit_sha") or "main"
+    file_summaries = _get_file_summaries(repo["id"])
+    if mode == "detailed" and not file_summaries:
+        with db() as conn:
+            rows = conn.execute("SELECT path, content FROM code_chunks WHERE repo_id = ?", (repo["id"],)).fetchall()
+            files = [(r["path"], r["content"]) for r in rows]
+        await profile.summarize_important_files(repo["id"], files, commit_sha)
+        file_summaries = _get_file_summaries(repo["id"])
+
+    # Load or generate project summary
     proj_summary = repo.get("project_summary", "")
-    if not proj_summary:
+    if not proj_summary and mode == "detailed":
         with db() as conn:
             row = conn.execute("SELECT content FROM code_chunks WHERE repo_id = ? AND path LIKE '%README%' LIMIT 1", (repo["id"],)).fetchone()
             readme_text = row["content"] if row else ""
@@ -169,10 +304,12 @@ async def answer_overview(repo: dict, question: str) -> dict[str, Any]:
             files = [(r["path"], r["content"]) for r in rows]
         proj_summary = await profile.generate_project_summary(prof, readme_text, files)
         if proj_summary:
+            llm_calls += 1
+            input_chars += 3000
+            output_chars += len(proj_summary)
             with db() as conn:
                 conn.execute("UPDATE repositories SET project_summary = ? WHERE id = ?", (proj_summary, repo["id"]))
 
-    # Key file summaries block
     top_summaries = []
     for path, smry in list(file_summaries.items())[:25]:
         top_summaries.append(f"- `{path}`: {smry}")
@@ -193,18 +330,18 @@ async def answer_overview(repo: dict, question: str) -> dict[str, Any]:
         f"User Question: {question}\n\n"
         "Remember to strictly follow the 8-section answer structure. Infer purpose from dependencies, routes, and models."
     )
-
+    input_chars += len(prompt)
     reply = await llm.generate(prompts.REPO_OVERVIEW, prompt)
+    llm_calls += 1
     if not reply:
-        # High quality deterministic offline fallback
         reply = (
             f"# {repo['name']}: Project Overview\n\n"
             f"{llm.OFFLINE_NOTICE}\n\n"
-            f"### Inferred Purpose\n{proj_summary}\n\n"
+            f"### Inferred Purpose\n{proj_summary or 'Inferred from codebase manifests and routes.'}\n\n"
             f"{prof_md}\n"
         )
+    output_chars += len(reply)
 
-    # Collect authoritative sources for overview
     sources: list[dict[str, Any]] = []
     key_paths = (
         prof.get("manifests", [])
@@ -236,16 +373,17 @@ async def answer_overview(repo: dict, question: str) -> dict[str, Any]:
             if len(sources) >= 8:
                 break
 
-    return {
+    result = {
         "reply": reply,
         "sources": sources,
         "confidence": "high",
         "inferred": True,
     }
+    return result, llm_calls, input_chars, output_chars
 
 
-async def answer_file(repo: dict, question: str, file_path: str) -> dict[str, Any]:
-    """Answers questions scoped to a specific file with its full chunks and summary."""
+async def answer_file(repo: dict, question: str, file_path: str) -> tuple[dict[str, Any], int, int, int]:
+    """Answers questions scoped to a specific file."""
     with db() as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM code_chunks WHERE repo_id = ? AND path = ? ORDER BY start_line", (repo["id"], file_path)
@@ -255,7 +393,7 @@ async def answer_file(repo: dict, question: str, file_path: str) -> dict[str, An
         ).fetchone()
 
     if not rows:
-        return {"reply": f"File `{file_path}` was not found in the index.", "sources": [], "confidence": "low", "inferred": False}
+        return {"reply": f"File `{file_path}` was not found in the index.", "sources": [], "confidence": "low", "inferred": False}, 0, 0, 0
 
     summary_text = summary_row["summary"] if summary_row else ""
     code_body = "\n".join(r["content"] for r in rows)[:25000]
@@ -267,23 +405,44 @@ async def answer_file(repo: dict, question: str, file_path: str) -> dict[str, An
         f"Question: {question}"
     )
 
+    llm_calls = 1
+    input_chars = len(prompt)
     reply = await llm.generate(prompts.REPO_SPECIFIC, prompt)
     if not reply:
         reply = f"{llm.OFFLINE_NOTICE}\n\n`{file_path}` has {len(rows)} indexed chunks.\n\nSummary:\n{summary_text}"
+    output_chars = len(reply)
 
     sources = [_format_source(repo, rows[0])]
-    return {
+    result = {
         "reply": reply,
         "sources": sources,
         "confidence": "high",
         "inferred": False,
     }
+    return result, llm_calls, input_chars, output_chars
 
 
-async def answer_specific(repo: dict, question: str) -> dict[str, Any]:
-    """Answers specific questions via query expansion, reciprocal rank fusion and continuity expansion."""
+async def answer_specific(repo: dict, question: str, mode: str = "quick", cleaned_readme: str = "") -> tuple[dict[str, Any], int, int, int]:
+    """Answers specific code questions via hybrid retrieval, with README header."""
+    llm_calls = 0
+    input_chars = 0
+    output_chars = 0
+
     index = get_index(repo["id"])
-    expanded_queries = await expand_query(question)
+    if mode == "detailed":
+        expanded_queries = await expand_query(question)
+        if len(expanded_queries) > 1:
+            llm_calls += 1
+            input_chars += len(question) + 150
+            output_chars += sum(len(q) for q in expanded_queries)
+    else:
+        # Cheap deterministic expansion in quick mode
+        expanded_queries = [question]
+        q_lower = question.lower()
+        if any(k in q_lower for k in ("login", "auth", "signin")):
+            expanded_queries.append("auth jwt login")
+        if any(k in q_lower for k in ("route", "api", "endpoint")):
+            expanded_queries.append("api router endpoint")
 
     query_results = [index.search(q, k=15) for q in expanded_queries]
     fused_results = reciprocal_rank_fusion(query_results, k=10)
@@ -294,15 +453,12 @@ async def answer_specific(repo: dict, question: str) -> dict[str, Any]:
             "sources": [],
             "confidence": "low",
             "inferred": False,
-        }
+        }, llm_calls, input_chars, output_chars
 
     raw_chunks = [item[0] for item in fused_results]
     max_bm25 = max(item[2] for item in fused_results)
-
-    # Add neighbouring continuity chunks
     full_chunks = add_neighbour_chunks(repo["id"], raw_chunks, max_added=4)
 
-    # Build context excerpts
     context_parts = []
     for i, c in enumerate(full_chunks, 1):
         context_parts.append(
@@ -310,17 +466,27 @@ async def answer_specific(repo: dict, question: str) -> dict[str, Any]:
         )
     context_str = "\n\n".join(context_parts)
 
-    # Add compact macro profile header
     prof = _get_project_profile(repo)
     tech_summary = ", ".join(prof.get("technologies", {}).get("frameworks", []) + prof.get("technologies", {}).get("databases_orms", []))
 
+    # Add small README header if README is present
+    readme_header = ""
+    if cleaned_readme:
+        sections = readme.split_readme_sections(cleaned_readme)
+        ranked = readme.rank_readme_sections(sections, question, top_k=2)
+        if ranked:
+            readme_header = "README Context:\n" + "\n".join(f"- {s['title']}: {s['content'][:250]}" for s in ranked) + "\n\n"
+
     prompt = (
         f"Repository: {repo['owner']}/{repo['name']} ({tech_summary or 'Custom Stack'})\n\n"
+        f"{readme_header}"
         f"Code excerpts:\n{context_str}\n\n"
         f"Question: {question}"
     )
 
+    input_chars += len(prompt)
     reply = await llm.generate(prompts.REPO_SPECIFIC, prompt)
+    llm_calls += 1
     sources = [_format_source(repo, item[0], item[1]) for item in fused_results]
 
     if not reply:
@@ -329,8 +495,8 @@ async def answer_specific(repo: dict, question: str) -> dict[str, Any]:
             "Here are the most relevant code locations found for your question:\n"
             + "\n".join(f"- `{s['path']}` lines {s['start_line']}-{s['end_line']}" for s in sources[:6])
         )
+    output_chars += len(reply)
 
-    # Confidence scoring
     if max_bm25 >= 2.5 and len(fused_results) >= 3:
         confidence = "high"
     elif max_bm25 >= 0.8:
@@ -338,22 +504,33 @@ async def answer_specific(repo: dict, question: str) -> dict[str, Any]:
     else:
         confidence = "low"
 
-    return {
+    result = {
         "reply": reply,
         "sources": sources,
         "confidence": confidence,
         "inferred": False,
     }
+    return result, llm_calls, input_chars, output_chars
 
 
 async def answer(
     repo: dict,
     question: str,
     file_path: str | None = None,
+    mode: str = "quick",
     system: str | None = None,
 ) -> dict[str, Any]:
-    """Unified entry point for answering questions with intelligent routing."""
-    # Custom system override (e.g. issues)
+    """Unified entry point with dual modes, README routing, token tracking and caching."""
+    commit_sha = repo.get("commit_sha") or "main"
+    mode_clean = "detailed" if mode == "detailed" else "quick"
+
+    # 1. Query Cache Check
+    if not system:
+        cached = _check_cache(repo["id"], commit_sha, mode_clean, question, file_path or "")
+        if cached:
+            return cached
+
+    # 2. System override (e.g. issues)
     if system and system == prompts.ISSUE:
         index = get_index(repo["id"])
         results = index.search(question, k=8)
@@ -366,13 +543,71 @@ async def answer(
         reply = await llm.generate(system, prompt)
         return {"reply": reply or "Offline mode: review code references.", "sources": sources, "confidence": "high", "inferred": False}
 
+    # 3. README Quality Evaluation
+    score, quality, cleaned = _get_readme_info(repo)
     route = classify_question(question, file_path)
-    if route == "overview":
-        return await answer_overview(repo, question)
-    elif route == "file":
-        return await answer_file(repo, question, file_path or "")
+
+    suggest_detailed = False
+    suggest_reason = ""
+    used_readme = False
+
+    if mode_clean == "quick":
+        if quality == "detailed" and route == "overview":
+            res, llm_calls, in_chars, out_chars = await answer_readme_overview(repo, question, cleaned)
+            used_readme = True
+            suggest_detailed = False
+        elif quality == "detailed":
+            # Specific code question in quick mode
+            res, llm_calls, in_chars, out_chars = await answer_specific(repo, question, mode="quick", cleaned_readme=cleaned)
+            used_readme = True
+            suggest_detailed = False
+        else:
+            # Basic or Poor README in quick mode
+            if route == "overview":
+                res, llm_calls, in_chars, out_chars = await answer_overview(repo, question, mode="quick")
+            elif route == "file":
+                res, llm_calls, in_chars, out_chars = await answer_file(repo, question, file_path or "")
+            else:
+                res, llm_calls, in_chars, out_chars = await answer_specific(repo, question, mode="quick", cleaned_readme=cleaned)
+            used_readme = False
+            suggest_detailed = True
+            suggest_reason = (
+                "README is minimal or missing, so this answer is built from code analysis."
+                if quality == "poor" else
+                "README is basic, so this answer is built from code analysis."
+            )
     else:
-        return await answer_specific(repo, question)
+        # Detailed mode: always runs full code analysis pipeline
+        if route == "overview":
+            res, llm_calls, in_chars, out_chars = await answer_overview(repo, question, mode="detailed")
+        elif route == "file":
+            res, llm_calls, in_chars, out_chars = await answer_file(repo, question, file_path or "")
+        else:
+            res, llm_calls, in_chars, out_chars = await answer_specific(repo, question, mode="detailed", cleaned_readme=cleaned)
+        used_readme = bool(cleaned and len(cleaned) > 50)
+        suggest_detailed = False
+
+    approx_in_tokens = in_chars // 4
+    approx_out_tokens = out_chars // 4
+
+    meta = {
+        "mode_used": mode_clean,
+        "used_readme": used_readme,
+        "readme_quality": quality,
+        "llm_calls": llm_calls,
+        "approx_input_tokens": approx_in_tokens,
+        "approx_output_tokens": approx_out_tokens,
+        "cached": False,
+    }
+
+    res["meta"] = meta
+    res["suggest_detailed"] = suggest_detailed
+    if suggest_detailed:
+        res["suggest_reason"] = suggest_reason
+
+    # 4. Cache the computed response
+    _save_cache(repo["id"], commit_sha, mode_clean, question, file_path or "", res)
+    return res
 
 
 def build_overview(repo: dict) -> str:

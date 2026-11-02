@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS repositories (
     chunk_count INTEGER DEFAULT 0,
     project_profile TEXT DEFAULT '',
     project_summary TEXT DEFAULT '',
+    readme_score INTEGER DEFAULT -1,
+    readme_quality TEXT DEFAULT '',
+    readme_cleaned TEXT DEFAULT '',
+    analysis_report TEXT DEFAULT '',
+    analysis_sha TEXT DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS code_chunks (
@@ -62,6 +67,18 @@ CREATE TABLE IF NOT EXISTS file_summaries (
     UNIQUE(repo_id, path)
 );
 CREATE INDEX IF NOT EXISTS idx_file_summaries_repo ON file_summaries(repo_id);
+CREATE TABLE IF NOT EXISTS query_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    commit_sha TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    question TEXT NOT NULL,
+    file_path TEXT DEFAULT '',
+    response_json TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(repo_id, commit_sha, mode, question, file_path)
+);
+CREATE INDEX IF NOT EXISTS idx_query_cache ON query_cache(repo_id, commit_sha, mode);
 CREATE TABLE IF NOT EXISTS generated_docs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -89,7 +106,15 @@ def init_db() -> None:
         # Safe migrations for existing databases
         cursor = conn.execute("PRAGMA table_info(repositories)")
         existing_cols = {row["name"] for row in cursor.fetchall()}
-        if "project_profile" not in existing_cols:
-            conn.execute("ALTER TABLE repositories ADD COLUMN project_profile TEXT DEFAULT ''")
-        if "project_summary" not in existing_cols:
-            conn.execute("ALTER TABLE repositories ADD COLUMN project_summary TEXT DEFAULT ''")
+        new_cols = {
+            "project_profile": "TEXT DEFAULT ''",
+            "project_summary": "TEXT DEFAULT ''",
+            "readme_score": "INTEGER DEFAULT -1",
+            "readme_quality": "TEXT DEFAULT ''",
+            "readme_cleaned": "TEXT DEFAULT ''",
+            "analysis_report": "TEXT DEFAULT ''",
+            "analysis_sha": "TEXT DEFAULT ''",
+        }
+        for col_name, col_def in new_cols.items():
+            if col_name not in existing_cols:
+                conn.execute(f"ALTER TABLE repositories ADD COLUMN {col_name} {col_def}")

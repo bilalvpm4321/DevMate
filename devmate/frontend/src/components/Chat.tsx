@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Source } from "../api";
+import type { AnswerMeta, Source } from "../api";
 import Markdown from "./Markdown";
 
 export interface Reply {
@@ -7,42 +7,68 @@ export interface Reply {
   sources?: Source[];
   confidence?: "high" | "medium" | "low";
   inferred?: boolean;
+  suggest_detailed?: boolean;
+  suggest_reason?: string;
+  meta?: AnswerMeta;
 }
+
 interface Message {
   role: "user" | "assistant";
   text: string;
   sources?: Source[];
   confidence?: "high" | "medium" | "low";
   inferred?: boolean;
+  suggest_detailed?: boolean;
+  suggest_reason?: string;
+  meta?: AnswerMeta;
 }
 
 interface Props {
-  send: (message: string) => Promise<Reply>;
+  send: (message: string, mode?: "quick" | "detailed") => Promise<Reply>;
   placeholder: string;
   examples: string[];
   emptyTitle: string;
   emptyText: string;
   resetKey?: string | number;
   onReset?: () => void;
+  showModeToggle?: boolean;
+  onTriggerDetailedAnalysis?: () => void;
 }
 
-export default function Chat({ send, placeholder, examples, emptyTitle, emptyText, resetKey, onReset }: Props) {
+function formatTokens(n: number): string {
+  if (n < 1000) return `${n}`;
+  return `${(n / 1000).toFixed(1)}k`;
+}
+
+export default function Chat({
+  send,
+  placeholder,
+  examples,
+  emptyTitle,
+  emptyText,
+  resetKey,
+  onReset,
+  showModeToggle = false,
+  onTriggerDetailedAnalysis,
+}: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [mode, setMode] = useState<"quick" | "detailed">("quick");
   const bottom = useRef<HTMLDivElement>(null);
 
   useEffect(() => { setMessages([]); setError(""); }, [resetKey]);
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, busy]);
 
-  async function submit(text = input) {
+  async function submit(text = input, overrideMode?: "quick" | "detailed") {
     const message = text.trim();
     if (!message || busy) return;
+    const activeMode = overrideMode || mode;
     setInput(""); setError(""); setBusy(true);
     setMessages((m) => [...m, { role: "user", text: message }]);
     try {
-      const res = await send(message);
+      const res = await send(message, activeMode);
       setMessages((m) => [
         ...m,
         {
@@ -51,6 +77,9 @@ export default function Chat({ send, placeholder, examples, emptyTitle, emptyTex
           sources: res.sources,
           confidence: res.confidence,
           inferred: res.inferred,
+          suggest_detailed: res.suggest_detailed,
+          suggest_reason: res.suggest_reason,
+          meta: res.meta,
         },
       ]);
     } catch (e) {
@@ -62,6 +91,27 @@ export default function Chat({ send, placeholder, examples, emptyTitle, emptyTex
 
   return (
     <div className="chat">
+      {showModeToggle && (
+        <div className="mode-toggle">
+          <button
+            type="button"
+            className={`mode-pill ${mode === "quick" ? "active" : ""}`}
+            onClick={() => setMode("quick")}
+            title="Overview questions answered from README and profile. Fast and token-efficient."
+          >
+            ⚡ Quick (uses README, saves tokens)
+          </button>
+          <button
+            type="button"
+            className={`mode-pill ${mode === "detailed" ? "active" : ""}`}
+            onClick={() => setMode("detailed")}
+            title="Deep multi-file analysis reading actual code, models, routes and architecture."
+          >
+            🔬 Detailed analysis (reads the code)
+          </button>
+        </div>
+      )}
+
       <div className="messages">
         {messages.length === 0 && (
           <div className="empty">
@@ -80,6 +130,30 @@ export default function Chat({ send, placeholder, examples, emptyTitle, emptyTex
           ) : (
             <div key={i} className="msg">
               <Markdown>{m.text}</Markdown>
+
+              {m.suggest_detailed && (
+                <div className="suggest-box">
+                  <span>
+                    ℹ️ {m.suggest_reason || "README is minimal, so this answer is built from code."}
+                  </span>
+                  <button
+                    className="btn small"
+                    onClick={() => {
+                      setMode("detailed");
+                      if (onTriggerDetailedAnalysis) {
+                        onTriggerDetailedAnalysis();
+                      } else {
+                        // Re-submit last question in detailed mode
+                        const lastUser = [...messages].reverse().find((msg) => msg.role === "user");
+                        if (lastUser) submit(lastUser.text, "detailed");
+                      }
+                    }}
+                  >
+                    Run detailed analysis →
+                  </button>
+                </div>
+              )}
+
               {(m.confidence || m.inferred) && (
                 <div className="row wrap" style={{ marginTop: 8, gap: 6, alignItems: "center" }}>
                   {m.confidence && (
@@ -94,6 +168,17 @@ export default function Chat({ send, placeholder, examples, emptyTitle, emptyTex
                   )}
                 </div>
               )}
+
+              {m.meta && (
+                <div className="meta-line">
+                  <span>
+                    {m.meta.cached
+                      ? `Answered from ${m.meta.used_readme ? "README" : "code analysis"} · cached`
+                      : `Answered from ${m.meta.used_readme ? "README" : "code analysis"} · ${m.meta.llm_calls} AI call${m.meta.llm_calls === 1 ? "" : "s"} · ~${formatTokens(m.meta.approx_input_tokens + m.meta.approx_output_tokens)} tokens`}
+                  </span>
+                </div>
+              )}
+
               {!!m.sources?.length && (
                 <div className="sources">
                   <span className="muted">Sources ({m.sources.length})</span>

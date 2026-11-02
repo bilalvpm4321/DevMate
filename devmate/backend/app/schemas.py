@@ -30,6 +30,7 @@ class RepoConnectRequest(BaseModel):
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     file_path: str | None = None
+    mode: Literal["quick", "detailed"] = "quick"
 
 
 class BotLinkRequest(BaseModel):

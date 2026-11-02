@@ -123,8 +123,14 @@ async def _call_openrouter(
     return resp.status_code, "", err_msg
 
 
+import time
+
+_GEMINI_COOLDOWN_UNTIL: float = 0.0
+
+
 async def generate(system: str, prompt: str, history: list[dict] | None = None) -> str:
     """Dispatches generation to Gemini, seamlessly falling back to OpenRouter upon rate limits or failures."""
+    global _GEMINI_COOLDOWN_UNTIL
     has_gemini = bool(settings.gemini_api_key)
     has_openrouter = bool(settings.openrouter_api_key)
 
@@ -132,6 +138,20 @@ async def generate(system: str, prompt: str, history: list[dict] | None = None) 
         return ""
 
     async with httpx.AsyncClient(timeout=90) as client:
+        # Fast path: If Gemini recently exceeded quota / hit 429, route directly to OpenRouter
+        if has_openrouter and time.time() < _GEMINI_COOLDOWN_UNTIL:
+            or_status, or_text, or_err = await _call_openrouter(
+                client, settings.openrouter_model, system, prompt, history
+            )
+            if or_status == 200 and or_text:
+                return or_text
+            if settings.openrouter_model != "openrouter/auto":
+                or_status, or_text, or_err = await _call_openrouter(
+                    client, "openrouter/auto", system, prompt, history
+                )
+                if or_status == 200 and or_text:
+                    return or_text
+
         # 1. Primary: Google Gemini
         if has_gemini:
             status, text, err = await _call_gemini(client, settings.gemini_model, system, prompt, history)
@@ -153,6 +173,7 @@ async def generate(system: str, prompt: str, history: list[dict] | None = None) 
             )
 
             if is_limit_or_error and has_openrouter:
+                _GEMINI_COOLDOWN_UNTIL = time.time() + 300  # 5 min cooldown for Gemini
                 logger.warning(
                     "Gemini API limit/failure encountered (status=%s, msg='%s'). "
                     "Flipping to OpenRouter fallback (%s)...",
